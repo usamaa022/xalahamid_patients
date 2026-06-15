@@ -1,1216 +1,741 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import toast from "react-hot-toast";
-import { db } from "@/lib/firebase";
+
+import { useState, useEffect, useCallback } from "react";
+import { initializeApp, getApps } from "firebase/app";
 import {
+  getFirestore,
   collection,
-  getDocs,
+  addDoc,
+  query,
+  orderBy,
+  onSnapshot,
   doc,
   updateDoc,
-  addDoc,
-  getDoc,
   deleteDoc,
-  query,
+  getDocs,
+  getDoc,
+  setDoc,
   where,
 } from "firebase/firestore";
-import {
-  FaPlus,
-  FaMinus,
-  FaShoppingCart,
-  FaPrint,
-  FaEdit,
-  FaUtensils,
-  FaLeaf,
-  FaCocktail,
-  FaStar,
-  FaTrash,
-  FaBoxOpen,
-  FaPizzaSlice,
-  FaHamburger,
-  FaDrumstickBite,
-  FaMugHot,
-  FaToggleOn,
-  FaToggleOff,
-  FaSave,
-  FaTimes,
-  FaRedo,
-} from "react-icons/fa";
 
-export default function RestaurantPOS() {
-  // State declarations
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [menu, setMenu] = useState([]);
-  const [starters, setStarters] = useState([]);
-  const [drinks, setDrinks] = useState([]);
-  const [cart, setCart] = useState([]);
-  const [orders, setOrders] = useState([]);
-  const [activeCategory, setActiveCategory] = useState("Pizza Offers");
-  const [selectedSizes, setSelectedSizes] = useState({});
-  const [editingItem, setEditingItem] = useState(null);
-  const [editName, setEditName] = useState("");
-  const [editPrice, setEditPrice] = useState("");
-  const [editSizePrices, setEditSizePrices] = useState({});
-  const [isPrinting, setIsPrinting] = useState(false);
-  const [isToggling, setIsToggling] = useState(false);
-  const [orderIdInput, setOrderIdInput] = useState("");
-  const [fetchedOrder, setFetchedOrder] = useState(null);
-  const [isFetching, setIsFetching] = useState(false);
-  const [nextOrderId, setNextOrderId] = useState(1);
-  const [isEditingOrder, setIsEditingOrder] = useState(false);
-  const cartRef = useRef(null);
+const firebaseConfig = {
+  apiKey: "AIzaSyA2nyHbJsPUbwNyYvEz3MMkFxW7EmoqUaI",
+  authDomain: "xala-hamid-skrter.firebaseapp.com",
+  projectId: "xala-hamid-skrter",
+  storageBucket: "xala-hamid-skrter.firebasestorage.app",
+  messagingSenderId: "89920461790",
+  appId: "1:89920461790:web:5ee66c174049877a21db4f",
+  measurementId: "G-15DPQRL161",
+};
 
-  // Load next order ID from localStorage
-  useEffect(() => {
-    const savedOrderId = localStorage.getItem("nextOrderId");
-    if (savedOrderId) {
-      setNextOrderId(parseInt(savedOrderId));
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+const db = getFirestore(app);
+
+// ─── Date helpers — always dd/mm/yyyy ────────────────────────────────────────
+// KEY FIX: "2024-01-15" parsed by new Date() becomes UTC midnight → wrong day
+// So we parse date strings manually to avoid timezone shifting.
+const parseDateSafe = (date) => {
+  if (!date) return null;
+  try {
+    if (date && typeof date === "object" && "toDate" in date) return date.toDate();
+    if (date?.seconds !== undefined) return new Date(date.seconds * 1000);
+    if (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      // Parse as local date to avoid UTC timezone shift
+      const [y, m, d] = date.split("-").map(Number);
+      return new Date(y, m - 1, d);
     }
-  }, []);
+    const d = new Date(date);
+    return isNaN(d.getTime()) ? null : d;
+  } catch { return null; }
+};
 
-  // Generate the next order ID
-  const generateOrderId = () => {
-    const currentId = nextOrderId;
-    const newId = currentId + 1;
-    setNextOrderId(newId);
-    localStorage.setItem("nextOrderId", newId.toString());
-    return newId.toString().padStart(3, '0');
-  };
+const formatDate = (date) => {
+  const d = parseDateSafe(date);
+  if (!d) return "N/A";
+  return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()}`;
+};
 
-  // Reset order ID
-  const resetOrderId = () => {
-    const confirmReset = window.confirm("Are you sure you want to reset the order ID?");
-    if (confirmReset) {
-      setNextOrderId(1);
-      localStorage.setItem("nextOrderId", "1");
-      toast.success("Order ID reset to 001!");
-    }
-  };
+const formatDateTime = (date) => {
+  const d = parseDateSafe(date);
+  if (!d) return "N/A";
+  return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+};
 
-  // Categories for the menu
-  const categories = [
-    { name: "Pizza Offers", color: "bg-red-100", icon: <FaPizzaSlice /> },
-    { name: "Burger Offers", color: "bg-yellow-100", icon: <FaHamburger /> },
-    { name: "Chicken Shawarma", color: "bg-orange-100", icon: <FaDrumstickBite /> },
-    { name: "Pizza Master", color: "bg-purple-100", icon: <FaPizzaSlice /> },
-    { name: "Types of Pizza", color: "bg-pink-100", icon: <FaPizzaSlice /> },
-  ];
-
-  // Toggle admin view
-  const toggleAdminView = () => {
-    const newState = !isAdmin;
-    setIsAdmin(newState);
-    localStorage.setItem("isAdmin", newState.toString());
-  };
-
-  // Fetch data from Firebase
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const menuSnapshot = await getDocs(collection(db, "menu"));
-        const menuData = menuSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-        setMenu(menuData);
-        const startersSnapshot = await getDocs(collection(db, "starters"));
-        const startersData = startersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-        setStarters(startersData);
-        const drinksSnapshot = await getDocs(collection(db, "drinks"));
-        const drinksData = drinksSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-        setDrinks(drinksData);
-        const ordersSnapshot = await getDocs(collection(db, "orders"));
-        const ordersData = ordersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-        setOrders(ordersData);
-        // Load admin state from localStorage
-        const savedAdminState = localStorage.getItem("isAdmin");
-        if (savedAdminState) {
-          setIsAdmin(savedAdminState === "true");
-        }
-      } catch (error) {
-        console.error("Error fetching data:", error);
-        toast.error("Failed to fetch data from Firebase.");
+// ─── Image Processing ─────────────────────────────────────────────────────────
+const convertToOptimizedGrayscale = (base64Image) =>
+  new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      const MAX = 1400;
+      let { width: w, height: h } = img;
+      if (w > h && w > MAX) { h = Math.round((h * MAX) / w); w = MAX; }
+      else if (h > MAX) { w = Math.round((w * MAX) / h); h = MAX; }
+      canvas.width = w; canvas.height = h;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(img, 0, 0, w, h);
+      const id = ctx.getImageData(0, 0, w, h);
+      const d = id.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = 0.2126 * d[i] + 0.7152 * d[i+1] + 0.0722 * d[i+2];
+        let a = lum < 128 ? Math.pow(lum/128,1.2)*128 : 128+Math.pow((lum-128)/128,0.8)*128;
+        a = Math.max(0, Math.min(255, (a-128)*1.1+128));
+        d[i] = d[i+1] = d[i+2] = a;
       }
+      ctx.putImageData(id, 0, 0);
+      let res = canvas.toDataURL("image/jpeg", 0.85);
+      if (Math.round((res.length*3)/4) > 800*1024) {
+        const fc = document.createElement("canvas");
+        const fx = fc.getContext("2d");
+        fc.width = Math.round(w*0.8); fc.height = Math.round(h*0.8);
+        fx.drawImage(canvas, 0, 0, fc.width, fc.height);
+        res = fc.toDataURL("image/jpeg", 0.78);
+      }
+      resolve(res);
     };
-    fetchData();
+    img.onerror = () => resolve(base64Image);
+    img.src = base64Image;
+  });
+
+const pickImage = (useCamera = false) =>
+  new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = "image/*";
+    if (useCamera) input.capture = "environment";
+    input.style.display = "none";
+    input.onchange = (e) => {
+      const file = e.target.files?.[0];
+      document.body.removeChild(input);
+      if (!file) { reject(new Error("Cancelled")); return; }
+      const reader = new FileReader();
+      reader.onload = (ev) => resolve(ev.target.result);
+      reader.onerror = () => reject(new Error("Read failed"));
+      reader.readAsDataURL(file);
+    };
+    input.oncancel = () => { document.body.removeChild(input); reject(new Error("Cancelled")); };
+    document.body.appendChild(input);
+    input.click();
+  });
+
+// ─── Firestore image storage (base64, no Firebase Storage) ───────────────────
+const IMAGES_COL = "patientImages";
+
+const saveImage = async (patientId, base64, imageId) => {
+  await setDoc(doc(db, IMAGES_COL, `${patientId}_${imageId}`), {
+    patientId, imageId, base64,
+    uploadedAt: new Date(),
+    name: `form_${imageId}.jpg`,
+  });
+};
+
+const loadImages = async (patientId) => {
+  const snap = await getDocs(query(collection(db, IMAGES_COL), where("patientId","==",patientId)));
+  return snap.docs.map(d => d.data()).sort((a,b) => {
+    const ta = a.uploadedAt?.toDate?.()?.getTime() || 0;
+    const tb = b.uploadedAt?.toDate?.()?.getTime() || 0;
+    return ta - tb;
+  });
+};
+
+const deleteImage = async (patientId, imageId) =>
+  deleteDoc(doc(db, IMAGES_COL, `${patientId}_${imageId}`));
+
+// ─── Generate sequential patient ID ──────────────────────────────────────────
+const getNextPatientId = async () => {
+  try {
+    const snap = await getDocs(collection(db, "patients"));
+    let max = 0;
+    snap.docs.forEach(d => { const n = d.data().patientId; if (typeof n==="number" && n>max) max=n; });
+    return max + 1;
+  } catch { return Date.now() % 10000; }
+};
+
+// ─── Print function — FIXED: single page, no blanks, triggers printer dialog ─
+const printImage = (base64, patientName, patientId) => {
+  const pw = window.open("", "_blank", "width=800,height=600");
+  if (!pw) { alert("Please allow popups to print"); return; }
+  // Write minimal HTML — only the image, nothing else
+  // Using onload on the img itself to trigger print only when image is ready
+  pw.document.write(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>${patientName} - Form</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;background:#fff;}
+img{width:100%;height:auto;display:block;page-break-inside:avoid;}
+@media print{
+  html,body{margin:0;padding:0;}
+  img{max-width:100%;page-break-before:avoid;page-break-after:avoid;}
+}
+</style>
+</head>
+<body>
+<img id="fi" src="${base64}" alt="form"/>
+<script>
+document.getElementById('fi').onload=function(){
+  window.focus();
+  window.print();
+  setTimeout(function(){window.close();},2000);
+};
+document.getElementById('fi').onerror=function(){
+  alert('Image failed to load');window.close();
+};
+</script>
+</body>
+</html>`);
+  pw.document.close();
+};
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+const C = {
+  // Layout
+  page:{ minHeight:"100vh", background: "linear-gradient(150deg, #00ffe1 0%, #2d85a5 40%, #90e0ef 70%, #cce7ff 100%);", padding:"24px 20px 60px", fontFamily:"'Segoe UI',system-ui,sans-serif" },
+  wrap:{ maxWidth:"1280px", margin:"0 auto" },
+
+  // Cards
+  card:{ background:"#fff", borderRadius:"20px", padding:"24px", marginBottom:"20px", boxShadow:"0 4px 24px rgba(0,0,0,0.12)" },
+  glassCard:{ background:"rgba(255,255,255,0.06)", backdropFilter:"blur(12px)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:"20px", padding:"20px 24px", marginBottom:"20px" },
+
+  // Header
+  headerInner:{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:"12px" },
+  logo:{ display:"flex", alignItems:"center", gap:"14px" },
+  logoIcon:{ width:"48px", height:"48px", borderRadius:"14px", background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"24px" },
+  h1:{ fontSize:"22px", fontWeight:"800", color:"#fff", margin:0 },
+  subtitle:{ fontSize:"12px", color:"rgba(255,255,255,0.5)", margin:"3px 0 0" },
+
+  // Inputs
+  input:{ width:"100%", padding:"12px 16px", border:"2px solid #e2e8f0", borderRadius:"12px", fontSize:"15px", outline:"none", boxSizing:"border-box", background:"#f8fafc", color:"#0f172a", transition:"border-color 0.2s" },
+  label:{ display:"block", marginBottom:"6px", fontWeight:"600", color:"#374151", fontSize:"13px" },
+  errText:{ color:"#ef4444", fontSize:"12px", marginTop:"4px" },
+
+  // Buttons
+  btnPrimary:{ background:"linear-gradient(135deg,#3b82f6,#2563eb)", color:"#fff", border:"none", padding:"11px 22px", borderRadius:"12px", fontSize:"14px", fontWeight:"700", cursor:"pointer", display:"flex", alignItems:"center", gap:"8px", boxShadow:"0 4px 14px rgba(59,130,246,0.4)", whiteSpace:"nowrap" },
+  btnGreen:{ background:"linear-gradient(135deg,#10b981,#059669)", color:"#fff", border:"none", padding:"9px 16px", borderRadius:"10px", fontSize:"13px", fontWeight:"600", cursor:"pointer", display:"flex", alignItems:"center", gap:"6px" },
+  btnBlue:{ background:"linear-gradient(135deg,#3b82f6,#2563eb)", color:"#fff", border:"none", padding:"9px 16px", borderRadius:"10px", fontSize:"13px", fontWeight:"600", cursor:"pointer", display:"flex", alignItems:"center", gap:"6px" },
+  btnPurple:{ background:"linear-gradient(135deg,#8b5cf6,#7c3aed)", color:"#fff", border:"none", padding:"9px 16px", borderRadius:"10px", fontSize:"13px", fontWeight:"600", cursor:"pointer", display:"flex", alignItems:"center", gap:"6px" },
+  btnRed:{ background:"linear-gradient(135deg,#ef4444,#dc2626)", color:"#fff", border:"none", padding:"9px 16px", borderRadius:"10px", fontSize:"13px", fontWeight:"600", cursor:"pointer", display:"flex", alignItems:"center", gap:"6px" },
+  btnGray:{ background:"#f1f5f9", color:"#475569", border:"1.5px solid #e2e8f0", padding:"9px 16px", borderRadius:"10px", fontSize:"13px", fontWeight:"600", cursor:"pointer" },
+  btnDisabled:{ background:"#f1f5f9", color:"#cbd5e1", border:"none", padding:"9px 16px", borderRadius:"10px", fontSize:"13px", fontWeight:"600", cursor:"not-allowed", display:"flex", alignItems:"center", gap:"6px" },
+
+  // Overlay / Modal
+  overlay:{ position:"fixed", inset:0, background:"rgba(0,0,0,0.75)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000, padding:"16px", backdropFilter:"blur(6px)" },
+  modal:{ background:"#fff", borderRadius:"24px", maxWidth:"520px", width:"100%", padding:"28px", maxHeight:"92vh", overflowY:"auto", boxShadow:"0 30px 80px rgba(0,0,0,0.4)" },
+  modalWide:{ background:"#fff", borderRadius:"24px", maxWidth:"680px", width:"100%", padding:"28px", maxHeight:"92vh", overflowY:"auto", boxShadow:"0 30px 80px rgba(0,0,0,0.4)" },
+  closeBtn:{ background:"#f1f5f9", border:"none", borderRadius:"10px", width:"36px", height:"36px", fontSize:"16px", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", color:"#64748b", flexShrink:0 },
+
+  // Patient card
+  patientCard:{ background:"#fff", borderRadius:"18px", padding:"18px", border:"1.5px solid #f1f5f9", boxShadow:"0 2px 12px rgba(0,0,0,0.06)", transition:"all 0.22s ease" },
+  idTag:{ background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", color:"#fff", padding:"3px 11px", borderRadius:"20px", fontSize:"11px", fontWeight:"800", letterSpacing:"0.3px" },
+  actionRow:{ display:"flex", gap:"8px", flexWrap:"wrap", marginTop:"14px" },
+
+  // Stats bar
+  statBox:{ background:"rgba(255,255,255,0.08)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:"14px", padding:"14px 18px", flex:1, minWidth:"120px" },
+  statNum:{ fontSize:"26px", fontWeight:"800", color:"#fff" },
+  statLbl:{ fontSize:"14px", color:"rgb(255, 255, 255)", marginTop:"2px" },
+
+  // Misc
+  sectionTitle:{ fontSize:"16px", fontWeight:"700", color:"#1e293b", marginBottom:"16px", display:"flex", alignItems:"center", gap:"8px" },
+  badge:{ padding:"3px 10px", borderRadius:"20px", fontSize:"12px", fontWeight:"700" },
+  spinner:{ display:"inline-block", width:"44px", height:"44px", border:"4px solid #e2e8f0", borderTop:"4px solid #3b82f6", borderRadius:"50%" },
+  emptyState:{ textAlign:"center", padding:"60px 20px", color:"#94a3b8" },
+  thumbnailWrap:{ borderRadius:"12px", overflow:"hidden", marginTop:"12px", cursor:"pointer", position:"relative" },
+  thumbnail:{ width:"100%", height:"160px", objectFit:"cover", display:"block", transition:"transform 0.2s" },
+  pageGrid:{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))", gap:"18px" },
+
+  pagination:{ display:"flex", justifyContent:"center", alignItems:"center", gap:"6px", marginTop:"28px", flexWrap:"wrap" },
+  pageBtn:{ padding:"8px 14px", borderRadius:"10px", border:"1.5px solid #e2e8f0", background:"#fff", cursor:"pointer", fontSize:"13px", fontWeight:"600" },
+};
+
+// ─── Component ────────────────────────────────────────────────────────────────
+export default function DoctorSecretary() {
+  const [patients, setPatients]             = useState([]);
+  const [loading, setLoading]               = useState(true);
+  const [search, setSearch]                 = useState("");
+  const [dateFrom, setDateFrom]             = useState("");
+  const [dateTo, setDateTo]                 = useState("");
+  const [page, setPage]                     = useState(1);
+  const PER_PAGE = 9;
+
+  const [showAdd, setShowAdd]               = useState(false);
+  const [newPat, setNewPat]                 = useState({ name:"", phone:"", date: new Date().toISOString().split("T")[0] });
+  const [formErr, setFormErr]               = useState({});
+  const [nextId, setNextId]                 = useState(1);
+  const [adding, setAdding]                 = useState(false);
+
+  const [selPatient, setSelPatient]         = useState(null);
+  const [showAttach, setShowAttach]         = useState(false);
+  const [showViewer, setShowViewer]         = useState(false);
+  const [showFull, setShowFull]             = useState(false);
+  const [viewImgs, setViewImgs]             = useState([]);
+  const [imgIdx, setImgIdx]                 = useState(0);
+  const [processing, setProcessing]         = useState(false);
+  const [loadingImgs, setLoadingImgs]       = useState(false);
+  const [progress, setProgress]             = useState("");
+  const [thumbCache, setThumbCache]         = useState({});
+
+  useEffect(() => { getNextPatientId().then(setNextId); }, []);
+
+  // realtime listener
+  useEffect(() => {
+    const q = query(collection(db,"patients"), orderBy("createdAt","desc"));
+    return onSnapshot(q, async (snap) => {
+      const list = snap.docs.map(d => ({
+        id: d.id, ...d.data(),
+        visitedDate: d.data().visitedDate?.toDate?.() || parseDateSafe(d.data().visitedDate),
+        createdAt:   d.data().createdAt?.toDate?.()   || new Date(),
+      }));
+      setPatients(list);
+      setLoading(false);
+      // load thumbnails for patients with images, lazily
+      list.forEach(async (p) => {
+        if ((p.imageCount||0) > 0 && !thumbCache[p.id]) {
+          const imgs = await loadImages(p.id);
+          if (imgs[0]) setThumbCache(prev => ({ ...prev, [p.id]: imgs[0].base64 }));
+        }
+      });
+    });
   }, []);
 
-  // Add item to cart
-  const addToCart = (item) => {
-    if (item.disabled) {
-      toast.error("This item is currently unavailable.", {
-        icon: <FaBoxOpen className="text-yellow-500" />,
-      });
-      return;
+  // ── filter
+  const filtered = patients.filter(p => {
+    const s = search.toLowerCase();
+    const matchS = !search || p.name?.toLowerCase().includes(s) || p.phoneNumber?.includes(search) || String(p.patientId).includes(search);
+    let matchD = true;
+    if (dateFrom||dateTo) {
+      const pd = new Date(p.visitedDate);
+      if (dateFrom) { const f=new Date(dateFrom); f.setHours(0,0,0,0); if(pd<f) matchD=false; }
+      if (dateTo&&matchD) { const t=new Date(dateTo); t.setHours(23,59,59,999); if(pd>t) matchD=false; }
     }
-    const size = selectedSizes[item.id] || (item.sizes ? item.sizes[0].name : null);
-    const price = item.sizes ? item.sizes.find((s) => s.name === size).price : item.price;
-    setCart((prev) => {
-      const existingItem = prev.find((i) => i.id === item.id && i.selectedSize === size);
-      if (existingItem) {
-        return prev.map((i) =>
-          i.id === item.id && i.selectedSize === size ? { ...i, quantityInCart: i.quantityInCart + 1 } : i
-        );
-      } else {
-        return [...prev, { ...item, selectedSize: size, price, quantityInCart: 1 }];
-      }
-    });
-    toast.success(`${item.name} ${size ? `(${size})` : ""} added to cart!`, {
-      icon: <FaPlus className="text-green-500" />,
-    });
-  };
+    return matchS && matchD;
+  });
 
-  // Add starter or drink to cart
-  const addStarterOrDrinkToCart = (item) => {
-    if (item.disabled) {
-      toast.error("This item is currently unavailable.", {
-        icon: <FaBoxOpen className="text-yellow-500" />,
-      });
-      return;
-    }
-    setCart((prev) => {
-      const existingItem = prev.find((i) => i.id === item.id);
-      if (existingItem) {
-        return prev.map((i) =>
-          i.id === item.id ? { ...i, quantityInCart: i.quantityInCart + 1 } : i
-        );
-      } else {
-        return [...prev, { ...item, quantityInCart: 1 }];
-      }
-    });
-    toast.success(`${item.name} added to cart!`, {
-      icon: <FaPlus className="text-green-500" />,
-    });
-  };
+  const totalPages = Math.ceil(filtered.length / PER_PAGE);
+  const paginated = filtered.slice((page-1)*PER_PAGE, page*PER_PAGE);
+  const stats = { total: patients.length, withForms: patients.filter(p=>(p.imageCount||0)>0).length, today: patients.filter(p=>{ const d=new Date(p.createdAt); const n=new Date(); return d.toDateString()===n.toDateString(); }).length };
 
-  // Remove item from cart
-  const removeFromCart = (id, size) => {
-    setCart((prev) => prev.filter((item) => !(item.id === id && item.selectedSize === size)));
-    toast.error("Item removed from cart.", {
-      icon: <FaTrash className="text-red-500" />,
-    });
-  };
-
-  // Update cart quantity
-  const updateCartQuantity = (id, size, delta) => {
-    setCart((prev) =>
-      prev
-        .map((item) =>
-          item.id === id && item.selectedSize === size
-            ? { ...item, quantityInCart: item.quantityInCart + delta }
-            : item
-        )
-        .filter((item) => item.quantityInCart > 0)
-    );
-  };
-
-  // Place or update order
-  const placeOrUpdateOrder = async () => {
-    if (cart.length === 0) {
-      toast.error("Your cart is empty!", {
-        icon: <FaBoxOpen className="text-yellow-500" />,
-      });
-      return;
-    }
-    setIsPrinting(true);
-    setTimeout(async () => {
-      try {
-        if (isEditingOrder) {
-          // Update existing order
-          const ordersRef = collection(db, "orders");
-          const q = query(ordersRef, where("id", "==", fetchedOrder.id));
-          const querySnapshot = await getDocs(q);
-          if (!querySnapshot.empty) {
-            const orderDocRef = doc(db, "orders", querySnapshot.docs[0].id);
-            await updateDoc(orderDocRef, {
-              items: cart,
-              total: cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0),
-            });
-            toast.success(`Order #${fetchedOrder.id} updated successfully! 🎉`, {
-              icon: <FaShoppingCart className="text-green-500" />,
-            });
-            printReceipt({ ...fetchedOrder, items: cart, total: cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0) });
-            setCart([]);
-            setIsEditingOrder(false);
-            setFetchedOrder(null);
-          } else {
-            toast.error("Order not found.");
-          }
-        } else {
-          // Place new order
-          const newOrder = {
-            id: generateOrderId(),
-            items: cart,
-            total: cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0),
-            date: new Date().toLocaleString(),
-          };
-          await addDoc(collection(db, "orders"), newOrder);
-          setOrders((prev) => [...prev, newOrder]);
-          printReceipt(newOrder);
-          toast.success(`Order #${newOrder.id} placed successfully! 🎉`, {
-            icon: <FaShoppingCart className="text-green-500" />,
-          });
-          setCart([]);
-        }
-      } catch (error) {
-        console.error("Error placing/updating order:", error);
-        toast.error("Failed to place/update order.");
-      } finally {
-        setIsPrinting(false);
-      }
-    }, 2000);
-  };
-
-  // Toggle item availability
-  const toggleItemDisabled = async (collectionName, id) => {
-    if (isToggling) return;
-    setIsToggling(true);
+  // ── add patient
+  const handleAdd = async (e) => {
+    e.preventDefault();
+    const err = {};
+    if (!newPat.name.trim()) err.name = "Name is required";
+    if (!newPat.phone.trim()) err.phone = "Phone is required";
+    else if (newPat.phone.replace(/\D/g,"").length < 7) err.phone = "Enter a valid number";
+    if (Object.keys(err).length) { setFormErr(err); return; }
+    setAdding(true);
     try {
-      const itemRef = doc(db, collectionName, String(id));
-      const docSnap = await getDoc(itemRef);
-      if (!docSnap.exists()) {
-        toast.error("Item not found in database.");
-        setIsToggling(false);
-        return;
-      }
-      let item;
-      let setStateFunction;
-      if (collectionName === "menu") {
-        item = menu.find((i) => i.id === id);
-        setStateFunction = setMenu;
-      } else if (collectionName === "starters") {
-        item = starters.find((i) => i.id === id);
-        setStateFunction = setStarters;
-      } else if (collectionName === "drinks") {
-        item = drinks.find((i) => i.id === id);
-        setStateFunction = setDrinks;
-      }
-      if (!item) {
-        setIsToggling(false);
-        return;
-      }
-      const newDisabledState = !item.disabled;
-      await updateDoc(itemRef, { disabled: newDisabledState });
-      setStateFunction((prev) =>
-        prev.map((item) =>
-          item.id === id ? { ...item, disabled: newDisabledState } : item
-        )
-      );
-      toast.success(`Item ${newDisabledState ? "disabled" : "enabled"} successfully!`);
-    } catch (error) {
-      console.error("Error toggling item:", error);
-      toast.error("Failed to toggle item.");
-    } finally {
-      setIsToggling(false);
-    }
-  };
-
-  // Start editing an item
-  const startEditing = (item) => {
-    setEditingItem(item.id);
-    setEditName(item.name);
-    setEditPrice(item.price || "");
-    if (item.sizes) {
-      const sizePrices = {};
-      item.sizes.forEach((size) => {
-        sizePrices[size.name] = size.price;
+      const pid = nextId;
+      // Store visitedDate as local date string to avoid timezone issues
+      const [y,m,d] = newPat.date.split("-").map(Number);
+      const localDate = new Date(y, m-1, d, 12, 0, 0); // noon local = safe
+      await addDoc(collection(db,"patients"), {
+        patientId: pid,
+        name: newPat.name.trim(),
+        phoneNumber: newPat.phone.trim(),
+        visitedDate: localDate,
+        imageCount: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       });
-      setEditSizePrices(sizePrices);
-    }
+      setNewPat({ name:"", phone:"", date: new Date().toISOString().split("T")[0] });
+      setNextId(pid+1);
+      setShowAdd(false);
+      setFormErr({});
+    } catch(err){ alert("Failed: "+err.message); }
+    finally { setAdding(false); }
   };
 
-  // Save edited item
-  const saveEditing = async (id) => {
-    const itemRef = doc(db, "menu", String(id));
-    const updatedItem = { ...menu.find((item) => item.id === id) };
-    updatedItem.name = editName;
-    updatedItem.price = editPrice;
-    if (updatedItem.sizes) {
-      updatedItem.sizes = updatedItem.sizes.map((size) => ({
-        ...size,
-        price: editSizePrices[size.name],
-      }));
-    }
-    await updateDoc(itemRef, updatedItem);
-    setMenu((prev) =>
-      prev.map((item) => (item.id === id ? updatedItem : item))
-    );
-    setEditingItem(null);
-    toast.success("Item updated!", {
-      icon: <FaSave className="text-blue-500" />,
-    });
-  };
-
-  // Start editing a starter
-  const startEditingStarter = (starter) => {
-    setEditingItem(starter.id);
-    setEditName(starter.name);
-    setEditPrice(starter.price);
-  };
-
-  // Save edited starter
-  const saveEditingStarter = async (id) => {
-    const starterRef = doc(db, "starters", String(id));
-    await updateDoc(starterRef, { name: editName, price: editPrice });
-    setStarters((prev) =>
-      prev.map((starter) =>
-        starter.id === id ? { ...starter, name: editName, price: editPrice } : starter
-      )
-    );
-    setEditingItem(null);
-    toast.success("Starter updated!", {
-      icon: <FaSave className="text-blue-500" />,
-    });
-  };
-
-  // Start editing a drink
-  const startEditingDrink = (drink) => {
-    setEditingItem(drink.id);
-    setEditName(drink.name);
-    setEditPrice(drink.price);
-  };
-
-  // Save edited drink
-  const saveEditingDrink = async (id) => {
-    const drinkRef = doc(db, "drinks", String(id));
-    await updateDoc(drinkRef, { name: editName, price: editPrice });
-    setDrinks((prev) =>
-      prev.map((drink) =>
-        drink.id === id ? { ...drink, name: editName, price: editPrice } : drink
-      )
-    );
-    setEditingItem(null);
-    toast.success("Drink updated!", {
-      icon: <FaSave className="text-blue-500" />,
-    });
-  };
-
-  // Print receipt
-  const printReceipt = (order) => {
-    const printWindow = window.open('', '_blank');
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>Pizza Master Receipt</title>
-          <style>
-            @media print {
-              @page { size: 58mm auto; margin: 0; }
-            }
-            body {
-              font-family: 'Courier New', monospace;
-              width: 58mm;
-              margin: 0;
-              padding: 5px;
-              font-size: 12px;
-              line-height: 1.2;
-              color: #000;
-            }
-            .header {
-              text-align: center;
-              font-weight: bold;
-              margin-bottom: 10px;
-              border-bottom: 1px dashed #000;
-              padding-bottom: 5px;
-            }
-            .items {
-              margin-bottom: 10px;
-            }
-            .item {
-              display: flex;
-              justify-content: space-between;
-              margin-bottom: 3px;
-            }
-            .total {
-              font-weight: bold;
-              margin-top: 10px;
-              border-top: 1px dashed #000;
-              padding-top: 5px;
-              text-align: right;
-            }
-            .footer {
-              text-align: center;
-              margin-top: 10px;
-              font-size: 10px;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="header">
-            <div>Pizza Master</div>
-            <div>Order #${order.id}</div>
-            <div>${new Date().toLocaleString()}</div>
-          </div>
-          <div class="items">
-            ${order.items
-              .map(
-                (item) => `
-                  <div class="item">
-                    <span>${item.name} ${item.selectedSize ? `(${item.selectedSize})` : ""}</span>
-                    <span>${item.quantityInCart} x ${item.price} IQD</span>
-                  </div>
-                `
-              )
-              .join("")}
-          </div>
-          <div class="total">
-            <div>Total: ${order.total} IQD</div>
-          </div>
-          <div class="footer">
-            <div>Thank you for your order!</div>
-            <div>Phone: +9647758501829</div>
-            <div>Visit us again!</div>
-          </div>
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
-    printWindow.close();
-  };
-
-  // Fetch order by ID
-  const fetchOrderById = async () => {
-    if (!orderIdInput) {
-      toast.error("Please enter an Order ID.");
-      return;
-    }
-    setIsFetching(true);
+  // ── process & save image
+  const processAndSave = useCallback(async (raw) => {
+    if (!selPatient) return;
+    setProcessing(true); setProgress("Converting to grayscale...");
     try {
-      const orderId = orderIdInput.padStart(3, '0');
-      const ordersRef = collection(db, "orders");
-      const q = query(ordersRef, where("id", "==", orderId));
-      const querySnapshot = await getDocs(q);
-      if (!querySnapshot.empty) {
-        const orderDoc = querySnapshot.docs[0];
-        const orderData = { id: orderDoc.id, ...orderDoc.data() };
-        setFetchedOrder(orderData);
-        setCart(orderData.items);
-        setIsEditingOrder(true);
-        toast.success(`Order #${orderId} fetched successfully!`);
-      } else {
-        toast.error("Order not found.");
-      }
-    } catch (error) {
-      console.error("Error fetching order:", error);
-      toast.error("Failed to fetch order.");
-    } finally {
-      setIsFetching(false);
+      const gs = await convertToOptimizedGrayscale(raw);
+      setProgress("Saving...");
+      const imgId = Date.now().toString();
+      await saveImage(selPatient.id, gs, imgId);
+      const ref = doc(db,"patients",selPatient.id);
+      const snap = await getDoc(ref);
+      await updateDoc(ref, { imageCount:(snap.data()?.imageCount||0)+1, updatedAt:new Date() });
+      setThumbCache(prev => ({ ...prev, [selPatient.id]: gs }));
+      setProgress("✓ Done!");
+      setTimeout(() => { setProcessing(false); setProgress(""); setShowAttach(false); }, 700);
+    } catch(e) {
+      alert("Save failed: "+e.message);
+      setProcessing(false); setProgress("");
     }
+  }, [selPatient]);
+
+  const handleCamera = async () => {
+    try { await processAndSave(await pickImage(true)); }
+    catch(e) { if(e.message!=="Cancelled") alert(e.message); setProcessing(false); }
+  };
+  const handleFile = async () => {
+    try { await processAndSave(await pickImage(false)); }
+    catch(e) { if(e.message!=="Cancelled") alert(e.message); setProcessing(false); }
   };
 
-  // Clear daily orders
-  const clearDailyOrders = async () => {
+  // ── viewer
+  const openViewer = async (patient) => {
+    setSelPatient(patient); setShowViewer(true); setLoadingImgs(true);
+    try { setViewImgs(await loadImages(patient.id)); }
+    catch(e) { alert("Load failed: "+e.message); }
+    finally { setLoadingImgs(false); }
+  };
+
+  // ── delete image
+  const handleDelete = async (imageId) => {
+    if (!confirm("Delete this form?")) return;
     try {
-      const ordersRef = collection(db, "orders");
-      const snapshot = await getDocs(ordersRef);
-      snapshot.forEach(async (doc) => {
-        await deleteDoc(doc.ref);
-      });
-      setOrders([]);
-      toast.success("All orders cleared for the day!");
-    } catch (error) {
-      console.error("Error clearing orders:", error);
-      toast.error("Failed to clear orders.");
-    }
+      await deleteImage(selPatient.id, imageId);
+      const updated = viewImgs.filter(i => i.imageId !== imageId);
+      setViewImgs(updated);
+      const ref = doc(db,"patients",selPatient.id);
+      const snap = await getDoc(ref);
+      await updateDoc(ref, { imageCount: Math.max(0,(snap.data()?.imageCount||1)-1), updatedAt:new Date() });
+      if (updated.length===0) setThumbCache(prev=>({...prev,[selPatient.id]:null}));
+      else if (imgIdx >= updated.length) setImgIdx(updated.length-1);
+      if (showFull && updated.length===0) setShowFull(false);
+    } catch(e) { alert("Delete failed: "+e.message); }
   };
 
-  // Auto-scroll cart
-  useEffect(() => {
-    if (cartRef.current) {
-      cartRef.current.scrollTop = cartRef.current.scrollHeight;
-    }
-  }, [cart]);
+  // ── render helpers
+  const Spinner = ({size=44}) => (
+    <div style={{...C.spinner,width:size,height:size,borderWidth:size/11}} className="spin"/>
+  );
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white shadow-sm sticky top-0 z-20">
-        <div className="container mx-auto px-4 py-4 flex justify-between items-center">
-          <img src={`/Images/logo.jpg`} className="w-40 h-20 object-contain rounded-lg shadow-md border border-gray-200" alt="Pizza Master Logo" />
-          <h1 className="text-3xl font-bold text-gray-800 flex items-center">
-            <FaUtensils className="mr-2 text-orange-600" /> Pizza Master
-          </h1>
-          <button
-            onClick={toggleAdminView}
-            className={`px-6 py-3 rounded-lg text-white font-medium flex items-center shadow-sm transition-all ${
-              isAdmin
-                ? "bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
-                : "bg-gradient-to-r from-teal-500 to-blue-500 hover:from-teal-600 hover:to-blue-600"
-            }`}
-          >
-            {isAdmin ? <FaUtensils className="mr-2" /> : <FaEdit className="mr-2" />}
-            {isAdmin ? "Customer View" : "Admin Panel"}
+    <div style={C.page}>
+      <style>{`
+        @keyframes spin{to{transform:rotate(360deg)}}
+        .spin{animation:spin .9s linear infinite}
+        .pcard:hover{transform:translateY(-3px);box-shadow:0 12px 32px rgba(59,130,246,0.18)!important;border-color:#bfdbfe!important}
+        .thumb:hover{transform:scale(1.03)}
+        input:focus{border-color:#3b82f6!important;box-shadow:0 0 0 3px rgba(59,130,246,0.14)!important}
+        button:not(:disabled):active{transform:scale(0.97)}
+        .pbtn:hover:not(:disabled){filter:brightness(1.08)}
+      `}</style>
+
+      <div style={C.wrap}>
+
+        {/* ── Header ─────────────────────────── */}
+        <div style={{...C.glassCard, ...C.headerInner}}>
+          <div style={C.logo}>
+            <div style={C.logoIcon}>🏥</div>
+            <div>
+              <h1 style={C.h1}>Dr.Hameed Muhammad Salih</h1>
+              <p style={C.subtitle}></p>
+            </div>
+          </div>
+          <button className="pbtn" style={C.btnPrimary} onClick={()=>setShowAdd(true)}>
+            <span style={{fontSize:"17px",lineHeight:1}}>＋</span> New Patient
           </button>
         </div>
-      </header>
-      <main className="container mx-auto px-4 py-8">
-        {isAdmin ? (
-          <AdminView
-            categories={categories}
-            activeCategory={activeCategory}
-            setActiveCategory={setActiveCategory}
-            menu={menu}
-            starters={starters}
-            drinks={drinks}
-            editingItem={editingItem}
-            editName={editName}
-            editPrice={editPrice}
-            editSizePrices={editSizePrices}
-            setEditName={setEditName}
-            setEditPrice={setEditPrice}
-            setEditSizePrices={setEditSizePrices}
-            setEditingItem={setEditingItem}
-            startEditing={startEditing}
-            saveEditing={saveEditing}
-            startEditingStarter={startEditingStarter}
-            saveEditingStarter={saveEditingStarter}
-            startEditingDrink={startEditingDrink}
-            saveEditingDrink={saveEditingDrink}
-            toggleItemDisabled={toggleItemDisabled}
-            clearDailyOrders={clearDailyOrders}
-          />
-        ) : (
-          <div className="grid grid-cols-12 gap-8">
-            {/* MAIN MENU SECTION - Wider column (8/12)  categoryyy*/}
-            <div className="col-span-12 lg:col-span-5">
-              <div className="mb-8">
-                <h2 className="text-3xl font-bold mb-6 flex items-center text-gray-800">
-                  <FaUtensils className="mr-3 text-orange-600" /> Menu
-                </h2>
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 mb-6">
-                  {categories.map((category) => (
-                    <button
-                      key={category.name}
-                      onClick={() => setActiveCategory(category.name)}
-                      className={`px-4 py-3 rounded-lg font-medium transition-all flex items-center justify-center ${
-                        activeCategory === category.name
-                          ? `${category.color} text-gray-800 shadow-md border border-gray-200`
-                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                      }`}
-                    >
-                      {category.icon && <span className="mr-2">{category.icon}</span>}
-                      {category.name}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {/* MAIN MENU ITEMS GRID - Changed to 2 items per row */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                <AnimatePresence>
-                  {menu
-                    .filter((item) => item.category === activeCategory)
-                    .map((item) => (
-                      <motion.div
-                        key={item.id}
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -20 }}
-                        whileTap={{ scale: 0.98 }}
-                        className={`bg-white rounded-xl shadow-sm overflow-hidden hover:shadow-md transition-all transform hover:-translate-y-1 h-[420px] flex flex-col ${
-                          item.disabled ? "opacity-60 cursor-not-allowed" : ""
-                        }`}
-                      >
-                        <div className="relative h-48">
-                          <img src={`/Images/${item.id}.jpg`} alt={item.name} className="w-full h-full object-cover" />
-                        </div>
-                        <div className="p-4 flex-1 flex flex-col">
-                          <h3 className="font-bold text-xl mb-2 flex-1 text-gray-800">{item.name}</h3>
-                          {item.sizes ? (
-                            <div className="flex flex-col space-y-2 mb-4 flex-1">
-                              <div className="grid grid-cols-3 gap-2">
-                                {item.sizes.map((size) => (
-                                  <button
-                                    key={size.name}
-                                    onClick={() => setSelectedSizes({ ...selectedSizes, [item.id]: size.name })}
-                                    disabled={item.disabled}
-                                    className={`px-2 py-1 rounded-lg text-sm font-medium transition-colors ${
-                                      selectedSizes[item.id] === size.name
-                                        ? "bg-teal-100 text-teal-800 border border-teal-300"
-                                        : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                                    } ${item.disabled ? "cursor-not-allowed" : ""}`}
-                                  >
-                                    {size.name} ({size.price} IQD)
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-                          ) : (
-                            <p className="text-gray-600 font-medium text-lg mb-4 flex-1">{item.price} IQD</p>
-                          )}
-                          <button
-                            onClick={() => addToCart(item)}
-                            disabled={item.disabled}
-                            className={`w-full py-3 rounded-lg flex items-center justify-center font-medium transition-all text-lg ${
-                              item.disabled
-                                ? "bg-gray-200 cursor-not-allowed text-gray-400"
-                                : "bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white shadow-sm hover:shadow-md active:scale-95 transform transition-transform"
-                            }`}
-                          >
-                            <FaPlus className="mr-2" /> Add to Cart
-                          </button>
-                        </div>
-                      </motion.div>
-                    ))}
-                </AnimatePresence>
-              </div>
+
+        {/* ── Stats bar ──────────────────────── */}
+        <div style={{display:"flex",gap:"12px",flexWrap:"wrap",marginBottom:"20px"}}>
+          {[
+{ num: stats.total,  lbl: "کۆی گشتی نەخۆش", icon: "👥" },
+            {num:stats.withForms, lbl:"فایلیان هەیە", icon:"📎"},
+            {num:stats.today, lbl:"نەخۆشی ئەمڕۆ", icon:"📅"},
+            {num:filtered.length, lbl:"دوای گەڕان", icon:"🔍"},
+          ].map(s => (
+            <div key={s.lbl} style={C.statBox}>
+              <div style={{fontSize:"20px",marginBottom:"4px"}}>{s.icon}</div>
+              <div style={C.statNum}>{s.num}</div>
+              <div style={C.statLbl}>{s.lbl}</div>
             </div>
-            {/* STARTERS & DRINKS SECTION - Stacked vertically in same column */}
-            <div className="col-span-12 lg:col-span-3 space-y-6">
-              {/* STARTERS SECTION */}
-              <div className="bg-white p-4 rounded-xl shadow-sm h-fit">
-                <h2 className="text-xl font-bold mb-4 flex items-center text-gray-800 justify-between border-b pb-2">
-                  <span className="flex items-center">
-                    <FaLeaf className="mr-2 text-green-500" /> Starters
-                  </span>
-                </h2>
-                <div className="space-y-3 max-h-[40vh] overflow-y-auto pr-2">
-                  {starters.map((starter) => (
-                    <div
-                      key={starter.id}
-                      onClick={() => !starter.disabled && addStarterOrDrinkToCart(starter)}
-                      className={`bg-gray-50 p-3 rounded-lg flex items-center space-x-3 cursor-pointer hover:bg-gray-100 transition-colors hover:shadow-sm ${
-                        starter.disabled ? "opacity-60 cursor-not-allowed" : ""
-                      }`}
-                    >
-                      <img src={`/Images/${starter.id}.jpg`} alt={starter.name} className="w-16 h-16 object-cover rounded-lg mr-3" />
-                      <div className="flex-1">
-                        <p className="font-medium text-lg text-black">{starter.name}</p>
-                        <p className="text-md text-gray-600">{starter.price} IQD</p>
-                      </div>
-                      <button
-                        className={`p-2 rounded-lg transition-colors ${
-                          starter.disabled
-                            ? "bg-gray-200 text-gray-400 cursor-not-allowed"
-                            : "bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 hover:from-green-200 hover:to-emerald-200"
-                        }`}
-                        disabled={starter.disabled}
-                      >
-                        <FaPlus className="text-lg" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              {/* DRINKS SECTION */}
-              <div className="bg-white p-4 rounded-xl shadow-sm h-fit">
-                <h2 className="text-xl font-bold mb-4 flex items-center text-gray-800 justify-between border-b pb-2">
-                  <span className="flex items-center">
-                    <FaMugHot className="mr-2 text-blue-500" /> Drinks
-                  </span>
-                </h2>
-                <div className="space-y-3 max-h-[40vh] overflow-y-auto pr-2">
-                  {drinks.map((drink) => (
-                    <div
-                      key={drink.id}
-                      onClick={() => !drink.disabled && addStarterOrDrinkToCart(drink)}
-                      className={`bg-gray-50 p-3 rounded-lg flex items-center space-x-3 cursor-pointer hover:bg-gray-100 transition-colors hover:shadow-sm ${
-                        drink.disabled ? "opacity-60 cursor-not-allowed" : ""
-                      }`}
-                    >
-                      <img src={`/Images/${drink.id}.jpg`} alt={drink.name} className="w-16 h-16 object-cover rounded-lg mr-3" />
-                      <div className="flex-1">
-                        <p className="font-medium text-lg text-black">{drink.name}</p>
-                        <p className="text-md text-gray-600">{drink.price} IQD</p>
-                      </div>
-                      <button
-                        className={`p-2 rounded-lg transition-colors ${
-                          drink.disabled
-                            ? "bg-gray-200 text-gray-400 cursor-not-allowed"
-                            : "bg-gradient-to-r from-blue-100 to-indigo-100 text-blue-800 hover:from-blue-200 hover:to-indigo-200"
-                        }`}
-                        disabled={drink.disabled}
-                      >
-                        <FaPlus className="text-lg" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
+          ))}
+        </div>
+
+        {/* ── Search card ────────────────────── */}
+        <div style={C.card}>
+          <div style={C.sectionTitle}>🔍 Search & Filter</div>
+          <input style={{...C.input,marginBottom:"12px"}} placeholder="Search by name, phone, or ID..."
+            value={search} onChange={e=>{setSearch(e.target.value);setPage(1);}}/>
+          <div style={{display:"flex",gap:"10px",flexWrap:"wrap",alignItems:"flex-end"}}>
+            <div style={{flex:1,minWidth:"140px"}}>
+              <label style={C.label}>From</label>
+              <input type="date" style={C.input} value={dateFrom} onChange={e=>{setDateFrom(e.target.value);setPage(1);}}/>
             </div>
-            {/* CART SECTION - Extended width */}
-            <div className="col-span-12 lg:col-span-4 bg-white p-4 rounded-xl shadow-sm h-[calc(100vh-120px)] sticky top-16 flex flex-col">
-              <h2 className="text-xl font-bold mb-4 flex items-center text-gray-800 justify-center border-b pb-2">
-                <FaShoppingCart className="mr-2 text-purple-600" /> Your Cart
-              </h2>
-              {cart.length === 0 ? (
-                <div className="text-center py-8 px-2 h-full flex flex-col items-center justify-center">
-                  <div className="bg-gray-50 p-6 rounded-lg mb-4">
-                    <FaShoppingCart className="text-5xl text-gray-300 mx-auto mb-3" />
-                    <p className="text-gray-800 font-medium text-lg">Your cart is empty</p>
-                  </div>
-                  <p className="text-gray-600">Add items to your cart to place an order</p>
-                </div>
-              ) : (
-                <>
-                  <div ref={cartRef} className="space-y-3 mb-4 max-h-[55vh] overflow-y-auto pr-2 flex-1">
-                    {cart.map((item) => (
-                      <motion.div
-                        key={`${item.id}-${item.selectedSize}`}
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -20 }}
-                        className="flex items-start p-4 border border-gray-200 rounded-lg bg-gray-50 w-full"
-                      >
-                        <img
-                          src={`/Images/${item.id}.jpg`}
-                          alt={item.name}
-                          className="w-16 h-16 object-cover rounded-lg mr-4"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <h3 className="font-semibold text-lg break-words text-gray-800">
-                            {item.name} {item.selectedSize ? `(${item.selectedSize})` : ""}
-                          </h3>
-                          <p className="text-sm text-gray-600 mt-1">
-                            {item.price * item.quantityInCart} IQD
-                          </p>
+            <div style={{flex:1,minWidth:"140px"}}>
+              <label style={C.label}>To</label>
+              <input type="date" style={C.input} value={dateTo} onChange={e=>{setDateTo(e.target.value);setPage(1);}}/>
+            </div>
+            {(search||dateFrom||dateTo) &&
+              <button style={C.btnGray} onClick={()=>{setSearch("");setDateFrom("");setDateTo("");setPage(1);}}>✕ Clear</button>}
+          </div>
+        </div>
+
+        {/* ── Patients grid ──────────────────── */}
+        <div style={C.card}>
+          <div style={{...C.sectionTitle,marginBottom:"20px"}}>
+            📋 Patients
+            <span style={{...C.badge, background:"#dbeafe", color:"#2563eb"}}>{filtered.length}</span>
+          </div>
+
+          {loading ? (
+            <div style={C.emptyState}><Spinner/><p style={{marginTop:14,fontSize:14}}>Loading...</p></div>
+          ) : filtered.length===0 ? (
+            <div style={C.emptyState}>
+              <div style={{fontSize:52,marginBottom:12}}>🔍</div>
+              <div style={{fontSize:16,fontWeight:700,color:"#475569"}}>No patients found</div>
+              <div style={{fontSize:13,marginTop:6}}>Adjust filters or add a new patient</div>
+            </div>
+          ) : (
+            <>
+              <div style={C.pageGrid}>
+                {paginated.map(p => (
+                  <div key={p.id} className="pcard" style={C.patientCard}>
+
+                    {/* Info row */}
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"8px"}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{display:"flex",alignItems:"center",gap:"7px",flexWrap:"wrap",marginBottom:"6px"}}>
+                          <span style={C.idTag}>#{p.patientId}</span>
+                          <span style={{fontSize:"15px",fontWeight:"700",color:"#0f172a",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"180px"}}>{p.name}</span>
                         </div>
-                        <div className="flex flex-col items-center ml-2">
-                          <div className="flex items-center space-x-3 mb-2">
-                            <button
-                              onClick={() => updateCartQuantity(item.id, item.selectedSize, -1)}
-                              className="p-2 rounded-full bg-red-50 text-red-500 hover:bg-red-100 transition-colors"
-                            >
-                              <FaMinus className="text-lg" />
-                            </button>
-                            <span className="text-lg font-medium w-8 text-center text-gray-800">
-                              {item.quantityInCart}
-                            </span>
-                            <button
-                              onClick={() => updateCartQuantity(item.id, item.selectedSize, 1)}
-                              className="p-2 rounded-full bg-green-50 text-green-500 hover:bg-green-100 transition-colors"
-                            >
-                              <FaPlus className="text-lg" />
-                            </button>
-                          </div>
-                          <button
-                            onClick={() => removeFromCart(item.id, item.selectedSize)}
-                            className="text-red-500 hover:text-red-600 transition-colors mt-2 text-sm flex items-center"
-                          >
-                            <FaTrash className="mr-1 text-lg" /> Remove
-                          </button>
-                        </div>
-                      </motion.div>
-                    ))}
-                  </div>
-                  <div className="border-t border-gray-200 pt-4 mt-auto">
-                    <div className="flex justify-between items-center mb-4">
-                      <span className="font-bold text-xl text-gray-800">Total:</span>
-                      <span className="font-bold text-xl text-purple-600">
-                        {cart.reduce((sum, item) => sum + item.price * item.quantityInCart, 0)} IQD
-                      </span>
+                        <p style={{fontSize:"13px",color:"#64748b",margin:"2px 0"}}>📞 {p.phoneNumber}</p>
+                        <p style={{fontSize:"13px",color:"#475569",margin:"2px 0"}}>📅 <strong>{formatDate(p.visitedDate)}</strong></p>
+                        <p style={{fontSize:"11px",color:"#94a3b8",margin:"2px 0"}}>🕒 {formatDateTime(p.createdAt)}</p>
+                      </div>
+                      {(p.imageCount||0)>0 &&
+                        <span style={{...C.badge, background:"linear-gradient(135deg,#10b981,#059669)", color:"#fff", flexShrink:0, fontSize:"11px", padding:"4px 10px"}}>
+                          📎 {p.imageCount}
+                        </span>}
                     </div>
-                    <button
-                      onClick={placeOrUpdateOrder}
-                      disabled={isPrinting}
-                      className={`w-full py-4 rounded-lg font-bold shadow-sm transition-all text-xl ${
-                        isPrinting
-                          ? "bg-gray-300 cursor-not-allowed text-gray-500"
-                          : "bg-gradient-to-r from-yellow-500 to-amber-500 text-white hover:shadow-lg transform hover:scale-105 active:scale-95"
-                      }`}
-                    >
-                      {isPrinting ? (
-                        <>
-                          <FaPrint className="mr-2 inline text-xl" /> Printing...
-                        </>
-                      ) : (
-                        <>
-                          {isEditingOrder ? (
-                            <>
-                              <FaSave className="mr-2 text-xl" /> Update Order
-                            </>
-                          ) : (
-                            <>
-                              <FaShoppingCart className="mr-2 text-xl" /> Place Order
-                            </>
-                          )}
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </>
-              )}
-              <div className="mt-4 p-4 bg-gray-100 rounded-xl shadow-sm">
-                <h2 className="text-xl font-bold mb-4 flex items-center text-gray-800">
-                  <FaBoxOpen className="mr-2 text-yellow-600" /> Past Orders
-                </h2>
-                <div className="flex space-x-2">
-                  <input
-                    type="text"
-                    value={orderIdInput}
-                    onChange={(e) => setOrderIdInput(e.target.value)}
-                    placeholder="Enter Order ID "
-                    className="flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-800"
-                  />
-                  <button
-                    onClick={fetchOrderById}
-                    disabled={isFetching}
-                    className={`px-4 py-2 rounded-lg font-medium flex items-center ${
-                      isFetching
-                        ? "bg-gray-300 cursor-not-allowed"
-                        : "bg-gradient-to-r from-blue-500 to-indigo-500 text-white hover:shadow-md"
-                    }`}
-                  >
-                    {isFetching ? (
-                      <>
-                        <FaPrint className="mr-2" /> Fetching...
-                      </>
-                    ) : (
-                      <>
-                        <FaBoxOpen className="mr-2" /> Fetch Order
-                      </>
+
+                    {/* Thumbnail */}
+                    {thumbCache[p.id] && (
+                      <div style={C.thumbnailWrap} onClick={()=>openViewer(p)}>
+                        <img src={thumbCache[p.id]} alt="form" style={C.thumbnail} className="thumb"/>
+                        <div style={{position:"absolute",bottom:0,left:0,right:0,padding:"20px 10px 8px", background:"linear-gradient(transparent,rgba(0,0,0,0.5))", borderRadius:"0 0 12px 12px"}}>
+                          <span style={{color:"#fff",fontSize:"11px",fontWeight:"600"}}>Click to view all forms</span>
+                        </div>
+                      </div>
                     )}
-                  </button>
+
+                    {/* Actions */}
+                    <div style={C.actionRow}>
+                      <button className="pbtn" style={C.btnGreen}
+                        onClick={()=>{setSelPatient(p);setShowAttach(true);}}>
+                        📷 Attach
+                      </button>
+                      <button className="pbtn" style={C.btnBlue} onClick={()=>openViewer(p)}>
+                        👁 View ({p.imageCount||0})
+                      </button>
+                      {(p.imageCount||0)>0
+                        ? <button className="pbtn" style={C.btnPurple}
+                            onClick={()=>{ if(thumbCache[p.id]) printImage(thumbCache[p.id],p.name,p.patientId); else { loadImages(p.id).then(imgs=>{ if(imgs[0]) printImage(imgs[0].base64,p.name,p.patientId); }); } }}>
+                            🖨 Print
+                          </button>
+                        : <button style={C.btnDisabled} disabled>🖨 Print</button>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Pagination */}
+              {totalPages>1 && (
+                <div style={C.pagination}>
+                  <button style={{...C.pageBtn,opacity:page===1?.5:1}} onClick={()=>page>1&&setPage(p=>p-1)} disabled={page===1}>← Prev</button>
+                  {Array.from({length:Math.min(totalPages,7)},(_,i)=>{
+                    let n;
+                    if (totalPages<=7) n=i+1;
+                    else if (page<=4) n=i+1;
+                    else if (page>=totalPages-3) n=totalPages-6+i;
+                    else n=page-3+i;
+                    return (
+                      <button key={n} style={{...C.pageBtn, ...(page===n?{background:"linear-gradient(135deg,#3b82f6,#2563eb)",color:"#fff",border:"none"}:{})}}
+                        onClick={()=>setPage(n)}>{n}</button>
+                    );
+                  })}
+                  <button style={{...C.pageBtn,opacity:page===totalPages?.5:1}} onClick={()=>page<totalPages&&setPage(p=>p+1)} disabled={page===totalPages}>Next →</button>
                 </div>
-                <button
-                  onClick={resetOrderId}
-                  className="mt-4 px-4 py-2 bg-gradient-to-r from-red-500 to-pink-500 text-white rounded-lg flex items-center justify-center w-full"
-                >
-                  <FaRedo className="mr-2" /> Reset Order ID
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* ── Add Patient Modal ─────────────────── */}
+      {showAdd && (
+        <div style={C.overlay} onClick={e=>{if(e.target===e.currentTarget)setShowAdd(false);}}>
+          <div style={C.modal}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"22px"}}>
+              <h2 style={{fontSize:"20px",fontWeight:"800",color:"#0f172a",margin:0}}>Add New Patient</h2>
+              <button style={C.closeBtn} onClick={()=>setShowAdd(false)}>✕</button>
+            </div>
+            <div style={{background:"linear-gradient(135deg,#eff6ff,#f5f3ff)",border:"1.5px solid #c7d2fe",borderRadius:"14px",padding:"14px",marginBottom:"20px"}}>
+              <div style={{fontSize:"11px",color:"#6366f1",fontWeight:"700",letterSpacing:"0.5px",marginBottom:"6px"}}>AUTO-ASSIGNED PATIENT ID</div>
+              <div style={{background:"linear-gradient(135deg,#3b82f6,#8b5cf6)",color:"#fff",padding:"10px 18px",borderRadius:"10px",display:"inline-block",fontSize:"28px",fontWeight:"900",letterSpacing:"2px"}}>
+                #{nextId}
+              </div>
+            </div>
+            <form onSubmit={handleAdd}>
+              <div style={{marginBottom:"16px"}}>
+                <label style={C.label}>Full Name *</label>
+                <input style={C.input} type="text" placeholder="Patient's full name"
+                  value={newPat.name} onChange={e=>setNewPat({...newPat,name:e.target.value})} autoFocus/>
+                {formErr.name && <p style={C.errText}>{formErr.name}</p>}
+              </div>
+              <div style={{marginBottom:"16px"}}>
+                <label style={C.label}>Phone Number *</label>
+                <input style={C.input} type="tel" placeholder="e.g. 07501234567"
+                  value={newPat.phone} onChange={e=>setNewPat({...newPat,phone:e.target.value})}/>
+                {formErr.phone && <p style={C.errText}>{formErr.phone}</p>}
+              </div>
+              <div style={{marginBottom:"24px"}}>
+                <label style={C.label}>Visit Date *</label>
+                <input style={C.input} type="date" value={newPat.date} onChange={e=>setNewPat({...newPat,date:e.target.value})}/>
+              </div>
+              <div style={{display:"flex",gap:"10px"}}>
+                <button type="button" style={{...C.btnGray,flex:1,padding:"12px",textAlign:"center"}} onClick={()=>setShowAdd(false)}>Cancel</button>
+                <button type="submit" disabled={adding} className="pbtn"
+                  style={{...C.btnPrimary,flex:2,justifyContent:"center",padding:"12px",opacity:adding?.7:1}}>
+                  {adding?"Adding...":"✓ Add Patient"}
                 </button>
               </div>
-            </div>
+            </form>
           </div>
-        )}
-      </main>
-    </div>
-  );
-}
+        </div>
+      )}
 
-// AdminView component
-function AdminView({
-  categories,
-  activeCategory,
-  setActiveCategory,
-  menu,
-  starters,
-  drinks,
-  editingItem,
-  editName,
-  editPrice,
-  editSizePrices,
-  setEditName,
-  setEditPrice,
-  setEditSizePrices,
-  setEditingItem,
-  startEditing,
-  saveEditing,
-  startEditingStarter,
-  saveEditingStarter,
-  startEditingDrink,
-  saveEditingDrink,
-  toggleItemDisabled,
-  clearDailyOrders,
-}) {
-  return (
-    <div className="grid grid-cols-1 gap-8">
-      <div className="bg-white p-6 rounded-xl shadow-sm">
-        <h2 className="text-2xl font-bold mb-6 flex items-center text-gray-800">
-          <FaEdit className="mr-3 text-purple-600" /> Manage Menu
-        </h2>
-        <div className="mb-6">
-          <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-3">
-            {categories.map((category) => (
-              <button
-                key={category.name}
-                onClick={() => setActiveCategory(category.name)}
-                className={`px-3 py-2 rounded-lg font-medium transition-all flex items-center justify-center ${
-                  activeCategory === category.name
-                    ? `${category.color} text-gray-800 shadow-sm border border-gray-200`
-                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                }`}
-              >
-                {category.icon && <span className="mr-1">{category.icon}</span>}
-                {category.name}
-              </button>
+      {/* ── Attach Image Modal ────────────────── */}
+      {showAttach && selPatient && (
+        <div style={C.overlay} onClick={e=>{if(e.target===e.currentTarget&&!processing){setShowAttach(false);setSelPatient(null);}}}>
+          <div style={C.modal}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"8px"}}>
+              <h2 style={{fontSize:"20px",fontWeight:"800",color:"#0f172a",margin:0}}>Attach Form</h2>
+              {!processing && <button style={C.closeBtn} onClick={()=>{setShowAttach(false);setSelPatient(null);}}>✕</button>}
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"22px",padding:"10px 14px",background:"#f8fafc",borderRadius:"10px",border:"1px solid #e2e8f0"}}>
+              <span style={{...C.idTag,fontSize:"12px"}}>#{selPatient.patientId}</span>
+              <span style={{fontSize:"14px",fontWeight:"600",color:"#1e293b"}}>{selPatient.name}</span>
+            </div>
+
+            {processing ? (
+              <div style={{textAlign:"center",padding:"40px 20px"}}>
+                <Spinner size={52}/>
+                <p style={{marginTop:"18px",fontSize:"17px",fontWeight:"700",color:"#1e293b"}}>{progress}</p>
+                <p style={{fontSize:"13px",color:"#64748b",marginTop:"6px"}}>Converting to grayscale & compressing...</p>
+                <div style={{marginTop:"16px",background:"#f1f5f9",borderRadius:"8px",height:"6px",overflow:"hidden"}}>
+                  <div style={{height:"100%",background:"linear-gradient(90deg,#3b82f6,#8b5cf6)",borderRadius:"8px",animation:"pgrow 2s ease infinite",width:"60%"}}/>
+                </div>
+              </div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:"12px"}}>
+                <button className="pbtn" onClick={handleCamera} style={{
+                  width:"100%",padding:"20px",borderRadius:"16px",border:"2px solid #86efac",
+                  background:"linear-gradient(135deg,#f0fdf4,#dcfce7)",color:"#15803d",
+                  fontSize:"15px",fontWeight:"700",cursor:"pointer",display:"flex",alignItems:"center",gap:"14px",
+                }}>
+                  <span style={{fontSize:"32px",lineHeight:1}}>📸</span>
+                  <div style={{textAlign:"left"}}>
+                    <div>Take Photo with Camera</div>
+                    <div style={{fontSize:"12px",fontWeight:"400",color:"#4ade80",marginTop:"3px"}}>Use device camera</div>
+                  </div>
+                </button>
+                <button className="pbtn" onClick={handleFile} style={{
+                  width:"100%",padding:"20px",borderRadius:"16px",border:"2px solid #93c5fd",
+                  background:"linear-gradient(135deg,#eff6ff,#dbeafe)",color:"#1d4ed8",
+                  fontSize:"15px",fontWeight:"700",cursor:"pointer",display:"flex",alignItems:"center",gap:"14px",
+                }}>
+                  <span style={{fontSize:"32px",lineHeight:1}}>📁</span>
+                  <div style={{textAlign:"left"}}>
+                    <div>Upload from Device</div>
+                    <div style={{fontSize:"12px",fontWeight:"400",color:"#60a5fa",marginTop:"3px"}}>Choose from gallery or files</div>
+                  </div>
+                </button>
+                <div style={{padding:"10px 14px",background:"#fefce8",borderRadius:"10px",border:"1px solid #fde047",fontSize:"12px",color:"#854d0e"}}>
+                  💡 Saved as grayscale for smaller storage. Multiple forms allowed per patient.
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Image Viewer Modal ────────────────── */}
+      {showViewer && selPatient && (
+        <div style={C.overlay} onClick={e=>{if(e.target===e.currentTarget){setShowViewer(false);setSelPatient(null);setViewImgs([]);}}}>
+          <div style={C.modalWide}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"6px"}}>
+              <h2 style={{fontSize:"19px",fontWeight:"800",color:"#0f172a",margin:0}}>{selPatient.name}'s Forms</h2>
+              <button style={C.closeBtn} onClick={()=>{setShowViewer(false);setSelPatient(null);setViewImgs([]);}}>✕</button>
+            </div>
+            <p style={{fontSize:"13px",color:"#64748b",marginBottom:"16px"}}>
+              ID #{selPatient.patientId} · {viewImgs.length} form{viewImgs.length!==1?"s":""} · Visit: {formatDate(selPatient.visitedDate)}
+            </p>
+            <button className="pbtn" style={{...C.btnGreen,width:"100%",justifyContent:"center",padding:"11px",marginBottom:"16px"}}
+              onClick={()=>{setShowViewer(false);setShowAttach(true);}}>
+              ＋ Attach Another Form
+            </button>
+
+            {loadingImgs ? (
+              <div style={{textAlign:"center",padding:"40px"}}><Spinner/><p style={{marginTop:12,color:"#64748b",fontSize:14}}>Loading...</p></div>
+            ) : viewImgs.length===0 ? (
+              <div style={C.emptyState}>
+                <div style={{fontSize:40,marginBottom:10}}>📂</div>
+                <div style={{fontWeight:600}}>No forms yet</div>
+              </div>
+            ) : viewImgs.map((img,i) => (
+              <div key={img.imageId} style={{border:"1.5px solid #e2e8f0",borderRadius:"14px",overflow:"hidden",marginBottom:"14px"}}>
+                <div style={{padding:"8px 12px",background:"#f8fafc",borderBottom:"1px solid #e2e8f0",display:"flex",justifyContent:"space-between"}}>
+                  <span style={{fontSize:"12px",color:"#64748b",fontWeight:"600"}}>Form {i+1} of {viewImgs.length}</span>
+                  <span style={{fontSize:"11px",color:"#94a3b8"}}>{formatDateTime(img.uploadedAt)}</span>
+                </div>
+                <img src={img.base64} alt={`Form ${i+1}`} style={{width:"100%",height:"auto",display:"block",cursor:"pointer"}}
+                  onClick={()=>{setImgIdx(i);setShowFull(true);}}/>
+                <div style={{display:"flex",gap:"8px",padding:"10px 12px",background:"#f8fafc",borderTop:"1px solid #e2e8f0"}}>
+                  <button className="pbtn" style={{...C.btnGreen,flex:1,justifyContent:"center"}}
+                    onClick={()=>printImage(img.base64,selPatient.name,selPatient.patientId)}>
+                    🖨 Print
+                  </button>
+                  <button className="pbtn" style={{...C.btnBlue,flex:1,justifyContent:"center"}}
+                    onClick={()=>{setImgIdx(i);setShowFull(true);}}>
+                    🔍 Fullscreen
+                  </button>
+                  <button className="pbtn" style={{...C.btnRed,flex:1,justifyContent:"center"}}
+                    onClick={()=>handleDelete(img.imageId)}>
+                    🗑 Delete
+                  </button>
+                </div>
+              </div>
             ))}
           </div>
         </div>
-        {activeCategory === "Starters" ? (
-          <StartersAdminView
-            items={starters}
-            editingItem={editingItem}
-            editName={editName}
-            editPrice={editPrice}
-            setEditName={setEditName}
-            setEditPrice={setEditPrice}
-            startEditing={startEditingStarter}
-            saveEditing={saveEditingStarter}
-            setEditingItem={setEditingItem}
-            toggleItemDisabled={toggleItemDisabled}
-          />
-        ) : activeCategory === "Drinks" ? (
-          <DrinksAdminView
-            items={drinks}
-            editingItem={editingItem}
-            editName={editName}
-            editPrice={editPrice}
-            setEditName={setEditName}
-            setEditPrice={setEditPrice}
-            startEditing={startEditingDrink}
-            saveEditing={saveEditingDrink}
-            setEditingItem={setEditingItem}
-            toggleItemDisabled={toggleItemDisabled}
-          />
-        ) : (
-          <MenuAdminView
-            items={menu.filter(item => item.category === activeCategory)}
-            editingItem={editingItem}
-            editName={editName}
-            editPrice={editPrice}
-            editSizePrices={editSizePrices}
-            setEditName={setEditName}
-            setEditPrice={setEditPrice}
-            setEditSizePrices={setEditSizePrices}
-            startEditing={startEditing}
-            saveEditing={saveEditing}
-            toggleItemDisabled={toggleItemDisabled}
-            setEditingItem={setEditingItem}
-          />
-        )}
-        <button
-          onClick={clearDailyOrders}
-          className="mt-6 px-4 py-2 bg-gradient-to-r from-red-500 to-pink-500 text-white rounded-lg flex items-center justify-center"
-        >
-          <FaTrash className="mr-2" /> Clear Daily Orders
-        </button>
-      </div>
-    </div>
-  );
-}
+      )}
 
-// StartersAdminView component
-function StartersAdminView({
-  items,
-  editingItem,
-  editName,
-  editPrice,
-  setEditName,
-  setEditPrice,
-  startEditing,
-  saveEditing,
-  setEditingItem,
-  toggleItemDisabled,
-}) {
-  return (
-    <div className="space-y-3">
-      <h3 className="text-xl font-semibold mb-4 text-black">Starters</h3>
-      <div className="grid grid-cols-1  md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {items.map((item) => (
-          <div key={item.id} className={`p-4 border border-gray-200 rounded-lg bg-white shadow-sm ${item.disabled ? "opacity-60" : ""}`}>
-            {editingItem === item.id ? (
-              <EditForm
-                editName={editName}
-                editPrice={editPrice}
-                setEditName={setEditName}
-                setEditPrice={setEditPrice}
-                onSave={() => saveEditing(item.id)}
-                onCancel={() => setEditingItem(null)}
-              />
-            ) : (
-              <ItemDisplay
-                item={item}
-                onEdit={() => startEditing(item)}
-                onToggle={() => toggleItemDisabled("starters", item.id)}
-                isMenuItem={false}
-              />
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// DrinksAdminView component
-function DrinksAdminView({
-  items,
-  editingItem,
-  editName,
-  editPrice,
-  setEditName,
-  setEditPrice,
-  startEditing,
-  saveEditing,
-  setEditingItem,
-  toggleItemDisabled,
-}) {
-  return (
-    <div className="space-y-4">
-      <h3 className="text-xl font-semibold mb-4 text-black">Drinks</h3>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {items.map((item) => (
-          <div key={item.id} className={`p-4 border border-gray-200 rounded-lg bg-white shadow-sm ${item.disabled ? "opacity-60" : ""}`}>
-            {editingItem === item.id ? (
-              <EditForm
-                editName={editName}
-                editPrice={editPrice}
-                setEditName={setEditName}
-                setEditPrice={setEditPrice}
-                onSave={() => saveEditing(item.id)}
-                onCancel={() => setEditingItem(null)}
-              />
-            ) : (
-              <ItemDisplay
-                item={item}
-                onEdit={() => startEditing(item)}
-                onToggle={() => toggleItemDisabled("drinks", item.id)}
-                isMenuItem={false}
-              />
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// MenuAdminView component
-function MenuAdminView({
-  items,
-  editingItem,
-  editName,
-  editPrice,
-  editSizePrices,
-  setEditName,
-  setEditPrice,
-  setEditSizePrices,
-  startEditing,
-  saveEditing,
-  toggleItemDisabled,
-  setEditingItem,
-}) {
-  return (
-    <div className="space-y-5">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {items.map((item) => (
-          <div key={item.id} className={`p-4 border-2 rounded-xl bg-white shadow-sm ${item.disabled ? "opacity-60" : ""}`}>
-            {editingItem === item.id ? (
-              <EditForm
-                editName={editName}
-                editPrice={editPrice}
-                editSizePrices={editSizePrices}
-                setEditName={setEditName}
-                setEditPrice={setEditPrice}
-                setEditSizePrices={setEditSizePrices}
-                onSave={() => saveEditing(item.id)}
-                onCancel={() => setEditingItem(null)}
-                item={item}
-              />
-            ) : (
-              <ItemDisplay
-                item={item}
-                onEdit={() => startEditing(item)}
-                onToggle={() => toggleItemDisabled("menu", item.id)}
-                isMenuItem={true}
-              />
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// EditForm component
-function EditForm({
-  editName,
-  editPrice,
-  editSizePrices,
-  setEditName,
-  setEditPrice,
-  setEditSizePrices,
-  onSave,
-  onCancel,
-  item,
-}) {
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center space-x-2">
-        <input
-          type="text"
-          value={editName}
-          onChange={(e) => setEditName(e.target.value)}
-          className="flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800"
-          placeholder="Item name"
-        />
-        {!item?.sizes ? (
-          <input
-            type="number"
-            value={editPrice}
-            onChange={(e) => setEditPrice(e.target.value)}
-            className="w-24 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800"
-            placeholder="Price"
-          />
-        ) : null}
-      </div>
-      {item?.sizes && (
-        <div className="flex flex-wrap gap-2">
-          {item.sizes.map((size) => (
-            <div key={size.name} className="flex items-center space-x-2">
-              <span className="font-medium w-12 text-gray-800">{size.name}:</span>
-              <input
-                type="number"
-                value={editSizePrices[size.name] || ""}
-                onChange={(e) =>
-                  setEditSizePrices({
-                    ...editSizePrices,
-                    [size.name]: e.target.value,
-                  })
-                }
-                className="w-20 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800"
-                placeholder="Price"
-              />
+      {/* ── Fullscreen viewer ─────────────────── */}
+      {showFull && viewImgs.length>0 && selPatient && (
+        <div style={{...C.overlay,background:"rgba(0,0,0,0.96)",flexDirection:"column",padding:"0"}}
+          onClick={e=>{if(e.target===e.currentTarget)setShowFull(false);}}>
+          {/* top bar */}
+          <div style={{width:"100%",padding:"14px 20px",display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(0,0,0,0.6)",flexShrink:0}}>
+            <span style={{color:"#fff",fontWeight:"700",fontSize:"15px"}}>{selPatient.name} · Form {imgIdx+1}/{viewImgs.length}</span>
+            <div style={{display:"flex",gap:"8px"}}>
+              <button className="pbtn" style={{...C.btnGreen,padding:"8px 16px"}} onClick={()=>printImage(viewImgs[imgIdx].base64,selPatient.name,selPatient.patientId)}>🖨 Print</button>
+              <button style={C.closeBtn} onClick={()=>setShowFull(false)}>✕</button>
             </div>
-          ))}
+          </div>
+          {/* image */}
+          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",padding:"12px"}}>
+            <img src={viewImgs[imgIdx].base64} alt="fullscreen" style={{maxWidth:"100%",maxHeight:"calc(100vh - 160px)",objectFit:"contain",borderRadius:"8px"}}/>
+          </div>
+          {/* nav */}
+          <div style={{padding:"14px 20px",display:"flex",justifyContent:"center",gap:"12px",background:"rgba(0,0,0,0.6)",flexShrink:0}}>
+            <button style={{...C.btnGray,padding:"9px 22px",opacity:imgIdx===0?.4:1}} disabled={imgIdx===0} onClick={()=>setImgIdx(i=>i-1)}>← Prev</button>
+            <span style={{color:"rgba(255,255,255,0.6)",padding:"9px 0",fontSize:"14px"}}>{imgIdx+1} / {viewImgs.length}</span>
+            <button style={{...C.btnGray,padding:"9px 22px",opacity:imgIdx===viewImgs.length-1?.4:1}} disabled={imgIdx===viewImgs.length-1} onClick={()=>setImgIdx(i=>i+1)}>Next →</button>
+            <button className="pbtn" style={{...C.btnRed,padding:"9px 18px"}} onClick={()=>{if(confirm("Delete?")){handleDelete(viewImgs[imgIdx].imageId);if(viewImgs.length===1)setShowFull(false);}}}>🗑 Delete</button>
+          </div>
         </div>
       )}
-      <div className="flex space-x-2">
-        <button
-          onClick={onSave}
-          className="flex-1 bg-gradient-to-r from-green-500 to-emerald-500 text-white py-2 rounded-lg flex items-center justify-center"
-        >
-          <FaSave className="mr-1" /> Save
-        </button>
-        <button
-          onClick={onCancel}
-          className="flex-1 bg-gray-200 text-gray-700 py-2 rounded-lg flex items-center justify-center"
-        >
-          <FaTimes className="mr-1" /> Cancel
-        </button>
-      </div>
-    </div>
-  );
-}
 
-// ItemDisplay component
-function ItemDisplay({ item, onEdit, onToggle, isMenuItem }) {
-  return (
-    <>
-      <div className="flex justify-between items-start mb-2">
-        <h3 className="font-bold text-lg text-gray-800 flex-1">{item.name}</h3>
-        {/* <button
-          onClick={onToggle}
-          className={`p-3 rounded-lg text-white flex items-center justify-center shadow-sm transition-all transform active:scale-95 ${
-            item.disabled ? "bg-red-500 hover:bg-red-600" : "bg-green-500 hover:bg-green-600"
-          }`}
-        >
-          {item.disabled ? <FaToggleOff className="text-lg" /> : <FaToggleOn className="text-lg" />}
-        </button> */}
-      </div>
-      {isMenuItem && item.sizes ? (
-        <div className="flex flex-wrap gap-2 mb-4">
-          {item.sizes.map((size) => (
-            <span key={size.name} className="px-3 py-1 bg-gray-100 rounded-full text-sm font-medium text-gray-800">
-              {size.name}: {size.price} IQD
-            </span>
-          ))}
-        </div>
-      ) : (
-        <p className="text-gray-600 font-medium mb-4">{item.price} IQD</p>
-      )}
-      <button
-        onClick={onEdit}
-        className="w-full bg-gradient-to-r from-blue-500 to-indigo-500 text-white py-2 rounded-lg flex items-center justify-center"
-      >
-        <FaEdit className="mr-2" /> Edit
-      </button>
-    </>
+      <style>{`@keyframes pgrow{0%{width:20%}50%{width:80%}100%{width:20%}}`}</style>
+    </div>
   );
 }
