@@ -425,7 +425,7 @@ export default function DoctorSecretary() {
           <div style={C.logo}>
             <div style={C.logoIcon}>🏥</div>
             <div>
-              <h1 style={C.h1}>Dr.Hameed Muhammad Salih</h1>
+              <h1 style={C.h1}>Dr.Hameed Muhamad Salih</h1>
               <p style={C.subtitle}></p>
             </div>
           </div>
