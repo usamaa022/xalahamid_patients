@@ -425,7 +425,7 @@ export default function DoctorSecretary() {
           <div style={C.logo}>
             <div style={C.logoIcon}>🏥</div>
             <div>
-              <h1 style={C.h1}>Dr.Hameed Muhammad Salih</h1>
+              <h1 style={C.h1}>Dr.Hameed Muhamad Salih</h1>
               <p style={C.subtitle}></p>
             </div>
           </div>
@@ -450,7 +450,7 @@ export default function DoctorSecretary() {
           ))}
         </div>
 
-        {/* ── Search card ────────────────────── */}
+        {/* ── Search card ───────────── */}
         <div style={C.card}>
           <div style={C.sectionTitle}>🔍 Search & Filter</div>
           <input style={{...C.input,marginBottom:"12px"}} placeholder="Search by name, phone, or ID..."
